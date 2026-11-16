@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Fire TV: a phone may open the app over DIAL (SSDP urn:dial-multiscreen-org:service:dial:1, POST /apps/StremioOrigin) -->
+<whisperplay>
+    <dial>
+        <application>
+            <dialid>StremioOrigin</dialid>
+        </application>
+    </dial>
+</whisperplay>
