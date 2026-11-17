@@ -212,6 +212,9 @@ static void mem_guard(void) {
         { extern void sp_mem_level(int); sp_mem_level(lvl); } /* the seek previews' decoders rest while the TV is nearly out */
         if (lvl != gLvl) { fprintf(stderr, "[mem] guard %d -> %d: app %d MB, TV free %d MB of %d%s\n", gLvl, lvl, rss, fr, tot, film ? " (a film plays)" : ""); gLvl = lvl; } } }
 }
+#ifdef SB_ANDROIDTV
+static GfxTarget atvLow; /* the 1280x720 picture the frame is drawn into (main) */
+#endif
 int main(int argc, char **argv) {
   (void)argc; (void)argv;
   /* webOS hands a native app its launch parameters as JSON in its first argument: a phone opening it to play something
@@ -269,8 +272,14 @@ int main(int argc, char **argv) {
 #ifdef SB_MAC
   SDL_GL_SetSwapInterval(0); /* the Mac swap blocks for ever on an occluded window with vsync; the loop paces itself */
 #else
+#ifdef SB_ANDROIDTV
+  vsyncOn = getenv("SB_VSYNC") ? atoi(getenv("SB_VSYNC")) : 1; /* Android TV: the display's own vsync. The compositor shows a frame only at a refresh; paced by our
+     own timer, frames drifted against it (a 59.94 Hz panel never lines up with 16.7 ms): some refreshes took two (one never
+     shown), some none (one shown twice), a steady hitch in motion while the frame counter read 60 */
+#else
   vsyncOn = getenv("SB_VSYNC") ? atoi(getenv("SB_VSYNC")) : 0;
-  SDL_GL_SetSwapInterval(vsyncOn); /* measured on the TV: with vsync the driver blocks a whole extra frame at the first GL call; the loop paces itself instead */
+#endif
+  SDL_GL_SetSwapInterval(vsyncOn); /* measured on the LG TV: with vsync the driver blocks a whole extra frame at the first GL call; the loop paces itself instead */
   pace_init();
 #endif
   plat_post_window(win);
@@ -278,6 +287,18 @@ int main(int argc, char **argv) {
   int dw, dh; SDL_GL_GetDrawableSize(win, &dw, &dh);
   fprintf(stderr, "[start] %s window %dx%d drawable %dx%d\n", plat_device_name(), w, h, dw, dh);
   if (!gfx_init(dw, dh)) return 1;
+#ifdef SB_ANDROIDTV
+  { /* Android TV draws at 1280x720 into a picture of its own, copied scaled to the whole screen at the end of each frame:
+       a third of 1080p's pixels to fill and blend, the part a weak box's GPU spends most of its frame on. The window and
+       the surface stay 1920x1080 (the pointer and the video plane read them as before). SB_RES=1080 (or "full") draws at
+       the screen's size */
+    const char *r = getenv("SB_RES"); int want = !r || (strcmp(r, "1080") && strcmp(r, "full"));
+    if (want && dh > 720 && gfx_target_create(&atvLow, 1280, 720)) { gfx_set_screen_fbo(atvLow.fbo); gfx_resize(1280, 720); dw = 1280; dh = 720; }
+    fprintf(stderr, "[start] drawing at %dx%d%s\n", dw, dh, atvLow.fbo ? ", scaled to the screen" : "");
+    /* a frame the same as the last one is not drawn again: still on the screen (a page at rest, the background trailer
+       under a still page), the GPU does nothing and the box's memory and CPU are the video's. SB_STILL=0: every frame drawn */
+    gfx_still(!getenv("SB_STILL") || atoi(getenv("SB_STILL"))); }
+#endif
   video_set_surface(dw, dh); /* the TV reads the video plane's rectangle in the drawable's pixels (720p light: 1280x720) */
 #ifdef SB_MAC
   if (SDL_GetWindowFlags(win) & SDL_WINDOW_HIDDEN) { /* a hidden window has no screen to draw to: draw into a picture the size the window would have */
@@ -314,6 +335,9 @@ int main(int argc, char **argv) {
   while (!app_quitting()) {
     SDL_Event e; Uint32 tEv0 = SDL_GetTicks();
     while (SDL_PollEvent(&e)) {
+#ifdef SB_ANDROIDTV
+      if (e.type == SDL_WINDOWEVENT || (e.type >= SDL_APP_TERMINATING && e.type <= SDL_APP_DIDENTERFOREGROUND) || e.type == SDL_RENDER_TARGETS_RESET || e.type == SDL_RENDER_DEVICE_RESET) gfx_still_reset(); /* (the surface may have lost its frame: the next is drawn) */
+#endif
       if (getenv("SB_EVLOG") || frame < 120) if (e.type == SDL_QUIT || e.type == SDL_KEYDOWN || e.type == SDL_KEYUP || e.type == SDL_WINDOWEVENT) fprintf(stderr, "[ev] type=%d%s sc=%d sym=%d win=%d\n", e.type, e.type == SDL_QUIT ? " QUIT" : "", e.type == SDL_KEYDOWN || e.type == SDL_KEYUP ? e.key.keysym.scancode : 0, e.type == SDL_KEYDOWN || e.type == SDL_KEYUP ? e.key.keysym.sym : 0, e.type == SDL_WINDOWEVENT ? e.window.event : 0);
       if (e.type == SDL_QUIT) { fprintf(stderr, "[exit] SDL_QUIT\n"); app_quit(); }
       else if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) { int k = plat_map_key(&e.key);
@@ -324,7 +348,11 @@ int main(int argc, char **argv) {
       else if (e.type == SDL_MOUSEMOTION) { if (e.motion.x || e.motion.y) app_pointer_move(e.motion.x * SB_W / w, e.motion.y * SB_H / h); }
       else if (e.type == SDL_MOUSEBUTTONDOWN || e.type == SDL_MOUSEBUTTONUP) { if (e.button.button == SDL_BUTTON_LEFT) app_pointer_button(e.type == SDL_MOUSEBUTTONDOWN, e.button.x * SB_W / w, e.button.y * SB_H / h); }
       else if (e.type == SDL_MOUSEWHEEL) app_pointer_wheel((float)e.wheel.x, (float)e.wheel.y);
-      else if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) { SDL_GL_GetDrawableSize(win, &dw, &dh); gfx_resize(dw, dh); }
+      else if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+#ifdef SB_ANDROIDTV
+        if (atvLow.fbo) continue; /* the 1280x720 picture keeps its size; only the copy follows the screen */
+#endif
+        SDL_GL_GetDrawableSize(win, &dw, &dh); gfx_resize(dw, dh); }
     }
     Uint32 now = SDL_GetTicks(); float dt = (now - last) / 1000.0f, dtReal = dt; last = now; /* (dtReal: behind another app, the time as it went: #69) */
     { float pp = (float)pace_period() / 1000.0f; if (pp <= 0) pp = 1 / 60.0f; /* motion on the 60 Hz clock: an on-time frame is one period (no millisecond jitter); a slow one moves it 3 periods at most (no jump) */
@@ -387,14 +415,20 @@ int main(int argc, char **argv) {
     Uint32 tCpu1 = SDL_GetTicks(); accPump += tCpu1 - tC;
     static int glFinishDev = -1; if (glFinishDev < 0) glFinishDev = getenv("SB_GLFINISH") != NULL; /* development: the GPU's own time shows as "gpu" */
     Uint64 tG0 = SDL_GetPerformanceCounter(); if (glFinishDev) glFinish(); Uint64 tG1 = SDL_GetPerformanceCounter();
-    SDL_GL_SwapWindow(win); Uint32 tSwap = SDL_GetTicks();
+    int stillFrame = 0;
+#ifdef SB_ANDROIDTV
+    stillFrame = gfx_still_skipped(); /* the last frame again: the screen keeps it, nothing to copy or swap */
+    if (atvLow.fbo && !stillFrame) { int sw, sh; SDL_GL_GetDrawableSize(win, &sw, &sh); gfx_upscale(atvLow.tex, sw, sh); }
+#endif
+    if (!stillFrame) SDL_GL_SwapWindow(win);
+    Uint32 tSwap = SDL_GetTicks();
     { /* the rate the screen really takes frames at: a webOS 4 TV takes 48 a second, not its panel's 60 (paced at 60, a
          fifth of the frames were never shown and all motion ran at four fifths of its speed). Measured once, at the first
          quiet moment (nothing pressed for 3 s, after the start): 60 frames with the driver waiting for the screen, their
          median; then the loop paces itself again, at that rate */
 #ifndef SB_MAC
       extern int app_pace_again_asked(void); static int hzState = -1, hzTries; static Uint64 hzLast; static float hzIv[60]; static int hzN; static Uint32 hzNext;
-      if (hzState < 0) hzState = !vsyncOn && !getenv("SB_HZ") && !getenv("SB_PACE") ? (plat_display_hz() > 0 ? 4 : 0) : 3;
+      if (hzState < 0) hzState = getenv("SB_HZ") || getenv("SB_PACE") ? 3 : plat_display_hz() > 0 ? 4 : !vsyncOn ? 0 : 3; /* (with vsync too: the display's rate sets the motion's step) */
       /* a platform that knows the rate it composes at (Android TV: the display mode, the video's own while one plays
          with its rate matched) is paced by it, read again every 2 s while no film is open, never timed: a busy box or an
          emulator timed 20 ms frames on a 60 Hz display and ran the app at 50. Only 48, 50 or 60, as timing finds them
@@ -433,7 +467,14 @@ int main(int argc, char **argv) {
 #ifdef SB_MAC
     if (stress_on()) pace_wait((double)(tSwap - tCpu0) + accPreFrame); else SDL_Delay(16); /* a stress run on the Mac checks the run itself (its numbers are not the TV's) */
 #else
-    { int pm = profN; if (!vsyncOn) pace_wait((double)(tSwap - tCpu0) + accPreFrame); else pace_observe(); if (profSlow) profN = pm; } /* the wait is not the frame's */
+#ifdef SB_ANDROIDTV
+    { /* over a playing film, while its controls (or a tray) are up: no vsync, the loop paces itself, so a press shows
+         without waiting for the next refresh (the film is on its own plane: its frames never wait for ours) */
+      static int base = -1; if (base < 0) base = vsyncOn;
+      int want = base && !player_controls_up();
+      if (want != vsyncOn) { vsyncOn = want; SDL_GL_SetSwapInterval(vsyncOn); fprintf(stderr, "[pace] vsync %s\n", vsyncOn ? "on" : "off (player controls up)"); } }
+#endif
+    { int pm = profN; if (!vsyncOn || stillFrame) pace_wait((double)(tSwap - tCpu0) + accPreFrame); else pace_observe(); if (profSlow) profN = pm; } /* the wait is not the frame's */
 #endif
     frames++; frame++; if (frame == 1 || frame == 10 || frame % 300 == 0) { { int q, w; img_queue_stats(&q, &w); fprintf(stderr, "[frame] pictures: %d queued, %d to upload\n", q, w); } fprintf(stderr, "[frame] %d drawn, %d fps, %d MB of pictures, cpu %.1f ms (pumps %.1f tick %.1f draw %.1f flush %.1f evict %.1f), swap %.1f ms, %d calls %d quads\n", frame, fps, img_used_mb(), accN ? accCpu / accN : 0, accN ? accPre / accN : 0, accN ? accTick / accN : 0, accN ? accDraw / accN : 0, accN ? accEnd / accN : 0, accN ? accPump / accN : 0, accN ? accSwap / accN : 0, gfx_draw_calls(), gfx_quads()); { char pr[256]; pace_report(pr, sizeof pr); fprintf(stderr, "[frame] %s\n", pr); } if (getenv("SB_MIDLOG")) { extern int gfx_mid_switches(void); fprintf(stderr, "[mid] %d mid-frame target switches since the last line\n", gfx_mid_switches()); } if (getenv("SB_FILL")) { char fr[300]; gfx_fill_report(fr, sizeof fr); fprintf(stderr, "[fill] %s %s\n", stress_screen(), fr); } { double lm, wm; int r, sh, lk; text_stats(&lm, &wm, &r, &sh, &lk); fprintf(stderr, "[frame] gl flushes %.1f ms per frame; text: lines %.1f ms, widths %.1f ms, %d rasterised, %d shaped, %d lookups (per frame over %d)\n", accN ? gfx_flush_ms(1) / accN : 0, accN ? lm / accN : 0, accN ? wm / accN : 0, r, sh, lk, accN); } accCpu = accSwap = accPre = accTick = accDraw = accEnd = accPump = 0; accN = 0;
 #ifndef SB_MAC

@@ -77,6 +77,11 @@ void gfx_tex_update(GLuint tex, const unsigned char *px, int x, int y, int w, in
 typedef struct { GLuint tex, fbo; int w, h; } GfxTarget;
 int  gfx_target_create(GfxTarget *t, int w, int h);   /* 0 when the driver cannot draw into textures */
 void gfx_target_free(GfxTarget *t);
+void gfx_upscale(unsigned tex, int screenW, int screenH);
+void gfx_still(int on);          /* Android TV: a frame the same as the last one is not drawn again (see gfx.c) */
+void gfx_still_reset(void);      /* the screen lost its frame: the next is drawn */
+int  gfx_still_skipped(void);    /* after gfx_end: 1 when this frame was the last one again (nothing to swap) */
+void gfx_still_spill(void);      /* about to use the GPU some other way mid-frame: what is kept is drawn first */ /* a smaller picture copied, filtered, over the whole screen (Android TV: 720p) */
 unsigned gfx_frame(void);                             /* frames begun so far */
 void gfx_target_begin(GfxTarget *t, uint32_t clear);  /* what is drawn next goes into t, in layout units */
 void gfx_target_end(void);

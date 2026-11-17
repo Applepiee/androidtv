@@ -10,7 +10,8 @@ PRIV="${ORIGIN_BUILD:-$HOME/origin-build}"
 NDK="${NDK:-$PRIV/android/sdk/ndk/27.2.12479018}"
 SDLSRC="${SDLSRC:-$PRIV/mac/SDL2-2.30.12}"
 W="$PRIV/android/work-atv/$ABI"; OUT="$ROOT/build/atv-$ABI/deps"; mkdir -p "$W" "$OUT/lib" "$OUT/include"
-TC=(-DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" -DANDROID_ABI="$ABI" -DANDROID_PLATFORM="android-$API" -DCMAKE_BUILD_TYPE=MinSizeRel -G Ninja)
+TC=(-DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" -DANDROID_ABI="$ABI" -DANDROID_PLATFORM="android-$API" -DCMAKE_BUILD_TYPE=MinSizeRel -G Ninja
+    -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384")   # 16 KB pages: Android 15+ devices with 16 KB pages refuse a library laid out for 4 KB
 REALPRIV="$(cd "$PRIV" && pwd -P)"   # (the build folder may be a link: CMake records its real path)
 FL="-ffile-prefix-map=$HOME=/src -ffile-prefix-map=$PRIV=/build -ffile-prefix-map=$REALPRIV=/build -ffile-prefix-map=$ROOT=/app"   # no local paths or folder names in the libraries (the last map that fits is the one used)
 
@@ -27,7 +28,7 @@ if [ ! -f "$OUT/lib/libcurl.so" ]; then
   cmake -S "$W/curl" -B "$W/curl-build" "${TC[@]}" -DBUILD_SHARED_LIBS=ON -DBUILD_STATIC_LIBS=OFF -DBUILD_CURL_EXE=OFF -DBUILD_TESTING=OFF -DBUILD_LIBCURL_DOCS=OFF -DBUILD_MISC_DOCS=OFF -DENABLE_CURL_MANUAL=OFF \
     -DCURL_USE_MBEDTLS=ON -DCURL_USE_OPENSSL=OFF -DMBEDTLS_INCLUDE_DIR="$OUT/include" -DMBEDTLS_LIBRARY="$OUT/lib/libmbedtls.a" -DMBEDX509_LIBRARY="$OUT/lib/libmbedx509.a" -DMBEDCRYPTO_LIBRARY="$OUT/lib/libmbedcrypto.a" \
     -DCURL_USE_LIBPSL=OFF -DCURL_USE_LIBSSH2=OFF -DUSE_NGHTTP2=OFF -DCURL_BROTLI=OFF -DCURL_ZSTD=OFF -DUSE_LIBIDN2=OFF -DCURL_DISABLE_LDAP=ON -DENABLE_WEBSOCKETS=ON -DENABLE_THREADED_RESOLVER=OFF \
-    -DCURL_CA_BUNDLE=none -DCURL_CA_PATH=none -DCMAKE_C_FLAGS="$FL" -DCMAKE_SHARED_LINKER_FLAGS="-Wl,--gc-sections" -DCMAKE_INSTALL_PREFIX="$OUT" >/dev/null
+    -DCURL_CA_BUNDLE=none -DCURL_CA_PATH=none -DCMAKE_C_FLAGS="$FL" -DCMAKE_SHARED_LINKER_FLAGS="-Wl,--gc-sections -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384" -DCMAKE_INSTALL_PREFIX="$OUT" >/dev/null
   cmake --build "$W/curl-build" >/dev/null && cmake --install "$W/curl-build" >/dev/null
 fi
 if [ ! -f "$OUT/lib/libSDL2.so" ]; then

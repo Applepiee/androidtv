@@ -30,6 +30,7 @@ static Prog progs[P_N];
 static int curProg = -1;
 static GLuint curTex;
 static int batchOpaque = 1, blendOn = 1;
+static int recOn, curHole, glHole, recWant, recSpilled, recSame, lastOk, recNB, recNV; static unsigned texGen, lastGen; static uint32_t recClear; /* (Android TV: the frame kept, see gfx_still) */
 static GLuint vbos[3]; static int vboCur; static GLsizeiptr vboOff, vboCap; static double flushMs; static int flushN; /* three streaming buffers in turn: the GPU may still read the last frame's */
 static int surfW, surfH;
 static float scl = 1.0f;
@@ -134,7 +135,7 @@ int gfx_init(int w, int h) {
   fprintf(stderr, "[gfx] %s | %s | %s\n", glGetString(GL_VENDOR), glGetString(GL_RENDERER), glGetString(GL_VERSION));
   return 1;
 }
-void gfx_resize(int w, int h) { surfW = w; surfH = h; scl = (float)w / SB_W; glViewport(0, 0, w, h); }
+void gfx_resize(int w, int h) { lastOk = 0; surfW = w; surfH = h; scl = (float)w / SB_W; glViewport(0, 0, w, h); }
 float gfx_scale(void) { return scl; }
 int gfx_draw_calls(void) { return drawCalls; }
 static long poolBytes, texBytes; static int npool, texCount;
@@ -164,10 +165,17 @@ static void use(int p) {
   glEnableVertexAttribArray(P->aRect); glVertexAttribPointer(P->aRect, 4, GL_FLOAT, GL_FALSE, sizeof(Vtx), (void *)20);
   glEnableVertexAttribArray(P->aPar); glVertexAttribPointer(P->aPar, 4, GL_FLOAT, GL_FALSE, sizeof(Vtx), (void *)36);
 }
+static void rec_add(void);
+static void submit(void);
 void gfx_flush(void) {
   if (!nvtx) return;
   if (curProg < 0) return;
+  if (recOn && !tgtOn) { rec_add(); return; } /* (Android TV: kept, drawn at the frame's end if it is not the last one again) */
+  submit();
+}
+static void submit(void) {
   use(curProg);
+  if (curHole != glHole) { glHole = curHole; if (glHole) glBlendFuncSeparate(GL_ZERO, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE_MINUS_SRC_ALPHA); else glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA); } /* (the video's hole erases what is under it) */
   if (curProg != P_SHAPE && curProg != P_PLAIN) { glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, curTex); }
   int wantBlend = !(curProg == P_PLAIN && batchOpaque); if (wantBlend != blendOn) { blendOn = wantBlend; if (blendOn) glEnable(GL_BLEND); else glDisable(GL_BLEND); } /* opaque fills skip the read-modify-write */
   static int logFrame0 = -1; if (logFrame0 < 0) logFrame0 = getenv("SB_FLUSHLOG") ? atoi(getenv("SB_FLUSHLOG")) : 0; if (logFrame0 && (int)frameCounter == logFrame0) glFinish();
@@ -191,26 +199,184 @@ void gfx_flush(void) {
   flushMs += SDL_GetTicks() - t0; flushN++;
   drawCalls++; quadsDrawn += nvtx / 6; nvtx = 0;
 }
+static int recSc[5]; /* the scissor the kept batches are drawn with: on, x, y, w, h */
 static void apply_clip(void) {
   gfx_flush();
   if (nclip) { int x = (int)floorf(curClip.x * scl), y = (int)floorf(curClip.y * scl), w = (int)ceilf((curClip.x + curClip.w) * scl) - x, h = (int)ceilf((curClip.y + curClip.h) * scl) - y;
     if (w < 0) w = 0; if (h < 0) h = 0;
+    if (recOn && !tgtOn) { recSc[0] = 1; recSc[1] = x; recSc[2] = surfH - y - h; recSc[3] = w; recSc[4] = h; return; }
     glEnable(GL_SCISSOR_TEST); glScissor(x, surfH - y - h, w, h); }
+  else if (recOn && !tgtOn) recSc[0] = 0;
   else glDisable(GL_SCISSOR_TEST);
 }
-void gfx_invalidate_state(void) { curProg = -1; curTex = 0; } /* someone else drew with raw GL: the next batch sets everything again */
+void gfx_invalidate_state(void) { curProg = -1; curTex = 0; lastOk = 0; } /* someone else drew with raw GL: the next batch sets everything again */
 double gfx_flush_ms(int reset) { double v = flushN ? flushMs : 0; if (reset) { flushMs = 0; flushN = 0; } return v; }
 void gfx_set_screen_fbo(GLuint fbo) { screenFbo = fbo; }
 void gfx_begin(uint32_t c) {
-  glBindFramebuffer(GL_FRAMEBUFFER, screenFbo);
+  recOn = recWant && !getenv("SB_NOCLEAR"); recSpilled = 0; recSame = 0; recClear = c; recSc[0] = 0; recNB = 0; recNV = 0; /* (the frame's batches, kept: see gfx_still) */
+  if (!recOn) glBindFramebuffer(GL_FRAMEBUFFER, screenFbo);
   scrDirty = 0; frameCounter++; pool_age(); vboCur = (vboCur + 1) % 3; glBindBuffer(GL_ARRAY_BUFFER, vbos[vboCur]); vboOff = 0; /* this frame's buffer: the GPU finished with it two frames ago */
   nvtx = 0; curProg = -1; curTex = 0; nclip = 0; nopac = 0; curOpac = 1; noff = 0; curOx = curOy = 0; nsc = 0; curSx = curSy = 1; drawCalls = quadsDrawn = 0; fillFrames++;
+  if (recOn) return; /* (bound and cleared when the kept batches are drawn) */
   glDisable(GL_SCISSOR_TEST);
   static int noClear = -1; if (noClear < 0) noClear = getenv("SB_NOCLEAR") != NULL;
   glClearColor(((c >> 16) & 255) / 255.0f, ((c >> 8) & 255) / 255.0f, (c & 255) / 255.0f, ((c >> 24) & 255) / 255.0f);
   if (!noClear) glClear(GL_COLOR_BUFFER_BIT);
 }
-void gfx_end(void) { gfx_flush(); glDisable(GL_SCISSOR_TEST); }
+
+/* ---- Android TV: only what changed is drawn again ------------------------------------------------------------------
+   While on, the screen's batches are kept instead of drawn. At the frame's end they are compared with the last frame's,
+   quad by quad (positions, colours, programs, pictures, clips, the clear). Where nothing differs, the picture the frame
+   is drawn into (Android TV's 1280x720 one, which keeps its pixels) already holds it: only the rectangle around what
+   changed is cleared and drawn again, every batch that reaches into it drawn in its order, clipped to it, so it comes out
+   exactly as a whole redraw would. Nothing changed: the GPU does nothing and the screen keeps its frame (the video plane
+   under it plays on by itself). Anything else that uses the GPU during the frame (an offscreen picture, a picture made,
+   changed or freed) draws what is kept at once, and the rest of the frame as it comes; that frame is drawn whole */
+typedef struct { int prog, opaque, hole, first, n, sc[5]; GLuint tex; } RecB;
+static RecB *recB, *prvB; static int recCapB, prvNB, prvCapB; static Vtx *recV, *prvV; static int recCapV, prvNV, prvCapV;
+static struct { int full, n, at[4][4]; unsigned frames, kept, part, whole, why[5], resets, spills; double partArea; } still; /* (why drawn whole: not comparable, pictures changed, the clear, the batches, too big) */
+static uint32_t prvClear; static int frameFull = 1, frameRect[4]; /* this frame's redrawn part of the picture, in its pixels (x, y from the top, w, h); frameFull: all of it */
+static void rec_add(void) {
+  if (recNB == recCapB) { int c = recCapB ? recCapB * 2 : 256; RecB *nb = realloc(recB, sizeof *recB * c); if (!nb) { gfx_still_spill(); gfx_flush(); return; } recB = nb; recCapB = c; }
+  if (recNV + nvtx > recCapV) { int c = recCapV ? recCapV : 8192; while (c < recNV + nvtx) c *= 2; Vtx *nv = realloc(recV, sizeof *recV * c); if (!nv) { gfx_still_spill(); gfx_flush(); return; } recV = nv; recCapV = c; }
+  RecB *b = &recB[recNB++]; b->prog = curProg; b->tex = curTex; b->opaque = batchOpaque; b->hole = curHole; memcpy(b->sc, recSc, sizeof b->sc); if (!b->sc[0]) memset(b->sc + 1, 0, sizeof b->sc - sizeof b->sc[0]); b->first = recNV; b->n = nvtx;
+  memcpy(recV + recNV, vtx, sizeof(Vtx) * nvtx); recNV += nvtx;
+  if (!tgtOn) scrDirty = 1;
+  drawCalls++; quadsDrawn += nvtx / 6; nvtx = 0;
+}
+/* the pixels (of the picture drawn into) a run of vertices can touch: x0, y0, x1, y1 from the top, a pixel of margin */
+static void vbox(const Vtx *v, int n, float *r) { for (int i = 0; i < n; i++) { if (v[i].x < r[0]) r[0] = v[i].x; if (v[i].y < r[1]) r[1] = v[i].y; if (v[i].x > r[2]) r[2] = v[i].x; if (v[i].y > r[3]) r[3] = v[i].y; } }
+static int px_rect(const float *r, int *o) { /* layout units to pixels, out to whole ones and a pixel more (filtering, soft edges): 0 when empty */
+  int x0 = (int)floorf(r[0] * scl) - 1, y0 = (int)floorf(r[1] * scl) - 1, x1 = (int)ceilf(r[2] * scl) + 1, y1 = (int)ceilf(r[3] * scl) + 1;
+  if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > surfW) x1 = surfW; if (y1 > surfH) y1 = surfH; if (x1 <= x0 || y1 <= y0) return 0;
+  o[0] = x0; o[1] = y0; o[2] = x1 - x0; o[3] = y1 - y0; return 1; }
+static void set_clear(uint32_t c) { glClearColor(((c >> 16) & 255) / 255.0f, ((c >> 8) & 255) / 255.0f, (c & 255) / 255.0f, ((c >> 24) & 255) / 255.0f); }
+/* the kept batches drawn: all of the picture (rect NULL), or only a part of it (pixels, from the top) */
+static void rec_replay_in(const int *rect) {
+  glBindFramebuffer(GL_FRAMEBUFFER, screenFbo);
+  int R[4] = { 0, 0, surfW, surfH }; if (rect) memcpy(R, rect, sizeof R);
+  int gx0 = R[0], gy0 = surfH - R[1] - R[3], gx1 = R[0] + R[2], gy1 = gy0 + R[3]; /* (GL counts rows from the bottom) */
+  if (rect) { glEnable(GL_SCISSOR_TEST); glScissor(gx0, gy0, R[2], R[3]); } else glDisable(GL_SCISSOR_TEST);
+  set_clear(recClear); glClear(GL_COLOR_BUFFER_BIT);
+  int hole = curHole, sc = rect != NULL, cur[4] = { gx0, gy0, R[2], R[3] };
+  for (int i = 0; i < recNB; i++) { RecB *b = &recB[i];
+    int x0 = gx0, y0 = gy0, x1 = gx1, y1 = gy1; /* this batch's scissor: the part, within its own clip */
+    if (b->sc[0]) { if (b->sc[1] > x0) x0 = b->sc[1]; if (b->sc[2] > y0) y0 = b->sc[2]; if (b->sc[1] + b->sc[3] < x1) x1 = b->sc[1] + b->sc[3]; if (b->sc[2] + b->sc[4] < y1) y1 = b->sc[2] + b->sc[4]; }
+    if (rect) { float r[4] = { 1e9f, 1e9f, -1e9f, -1e9f }; vbox(recV + b->first, b->n, r); int p[4]; if (!px_rect(r, p)) continue;
+      int bx0 = p[0], by0 = surfH - p[1] - p[3], bx1 = p[0] + p[2], by1 = by0 + p[3]; if (bx1 <= x0 || bx0 >= x1 || by1 <= y0 || by0 >= y1) continue; } /* (nowhere near the part: not drawn) */
+    if (x1 <= x0 || y1 <= y0) continue;
+    int want = rect || b->sc[0];
+    if (want) { int w[4] = { x0, y0, x1 - x0, y1 - y0 }; if (!sc) glEnable(GL_SCISSOR_TEST); if (!sc || memcmp(w, cur, sizeof w)) { glScissor(w[0], w[1], w[2], w[3]); memcpy(cur, w, sizeof w); } sc = 1; }
+    else if (sc) { glDisable(GL_SCISSOR_TEST); sc = 0; }
+    memcpy(vtx, recV + b->first, sizeof(Vtx) * b->n); nvtx = b->n; curProg = b->prog; curTex = b->tex; batchOpaque = b->opaque; curHole = b->hole; submit(); }
+  nvtx = 0; curHole = hole; curProg = -1; curTex = 0; batchOpaque = 1;
+  glDisable(GL_SCISSOR_TEST);
+}
+/* development (SB_STILLCHECK=1): now and then, a frame drawn in part is drawn whole into a second picture and the two compared, pixel for pixel */
+static void still_check(void) {
+  static int on = -1; static unsigned n, bad, runs; static GfxTarget ck; static unsigned char *a, *b; if (on < 0) on = getenv("SB_STILLCHECK") != NULL; if (!on || n++ % 30) return;
+  if (!ck.fbo && !gfx_target_create(&ck, surfW, surfH)) { on = 0; return; } if (!a) { a = malloc((size_t)surfW * surfH * 4); b = malloc((size_t)surfW * surfH * 4); if (!a || !b) { on = 0; return; } }
+  glBindFramebuffer(GL_FRAMEBUFFER, screenFbo); glReadPixels(0, 0, surfW, surfH, GL_RGBA, GL_UNSIGNED_BYTE, a);
+  GLuint keep = screenFbo; screenFbo = ck.fbo; rec_replay_in(NULL); glReadPixels(0, 0, surfW, surfH, GL_RGBA, GL_UNSIGNED_BYTE, b); screenFbo = keep; glBindFramebuffer(GL_FRAMEBUFFER, screenFbo);
+  long diff = 0; int worst = 0; for (long i = 0; i < (long)surfW * surfH * 4; i++) { int d = abs((int)a[i] - (int)b[i]); if (d) { diff++; if (d > worst) worst = d; } }
+  runs++; if (diff) bad++;
+  fprintf(stderr, "[stillcheck] %u compared, %u differed; this one: %ld values differ (worst by %d)\n", runs, bad, diff, worst); }
+static void rec_keep(void) { /* this frame's batches become the last frame's */
+  RecB *tb = prvB; prvB = recB; recB = tb; int t = prvCapB; prvCapB = recCapB; recCapB = t; prvNB = recNB; recNB = 0;
+  Vtx *tv = prvV; prvV = recV; recV = tv; t = prvCapV; prvCapV = recCapV; recCapV = t; prvNV = recNV; recNV = 0; prvClear = recClear; }
+/* what differs from the last frame, as a box in layout units (r): 0 nothing, 1 a part, -1 too much to tell (all of it) */
+static int rec_diff(float *r) {
+  if (!lastOk || texGen != lastGen || recClear != prvClear || recNB != prvNB) { still.why[!lastOk ? 0 : texGen != lastGen ? 1 : recClear != prvClear ? 2 : 3]++; return -1; }
+  int any = 0;
+  for (int i = 0; i < recNB; i++) { RecB *a = &recB[i], *b = &prvB[i]; const Vtx *va = recV + a->first, *vb = prvV + b->first;
+    if (a->prog != b->prog || a->tex != b->tex || a->opaque != b->opaque || a->hole != b->hole || memcmp(a->sc, b->sc, sizeof a->sc) || a->n != b->n) { vbox(va, a->n, r); vbox(vb, b->n, r); any = 1; continue; }
+    if (!memcmp(va, vb, sizeof(Vtx) * a->n)) continue;
+    for (int q = 0; q + 6 <= a->n; q += 6) if (memcmp(va + q, vb + q, sizeof(Vtx) * 6)) { vbox(va + q, 6, r); vbox(vb + q, 6, r); any = 1; } }
+  return any; }
+
+void gfx_still(int on) { recWant = on; lastOk = 0; }
+void gfx_still_reset(void) { lastOk = 0; still.n = 0; still.resets++; } /* the screen's last frame is gone (a new surface, back from the background): the next is drawn whole */
+int gfx_still_skipped(void) { return recSame; }
+void gfx_still_spill(void) { /* something else uses the GPU now: what is kept is drawn first, the rest of the frame as it comes */
+  if (!recOn) return; recOn = 0; recSpilled = 1; still.spills++;
+  int pn = nvtx, pp = curProg, po = batchOpaque; GLuint pt = curTex; Vtx *pv = pn ? malloc(sizeof(Vtx) * pn) : NULL; /* (the batch being filled: drawn after, as it would have been) */
+  if (pn && !pv) { submit(); drawCalls++; quadsDrawn += nvtx / 6; nvtx = 0; pn = 0; } /* (no memory for it: drawn now, before the kept ones) */
+  if (pv) memcpy(pv, vtx, sizeof(Vtx) * pn);
+  rec_replay_in(NULL); recNB = 0; recNV = 0;
+  apply_clip();
+  if (pv) { memcpy(vtx, pv, sizeof(Vtx) * pn); nvtx = pn; curProg = pp; curTex = pt; batchOpaque = po; free(pv); } }
+void gfx_end(void) {
+  gfx_flush();
+  if (recOn) { recOn = 0; float r[4] = { 1e9f, 1e9f, -1e9f, -1e9f }; int d = rec_diff(r), p[4];
+    if (d == 0) { recSame = 1; still.kept++; } /* the last frame again: nothing drawn */
+    else if (d > 0 && screenFbo && px_rect(r, p) && (double)p[2] * p[3] < 0.6 * surfW * surfH) { rec_replay_in(p); still_check(); frameFull = 0; memcpy(frameRect, p, sizeof p); still.part++; still.partArea += (double)p[2] * p[3] / ((double)surfW * surfH); }
+    else if (d > 0 && !px_rect(r, p)) { recSame = 1; still.kept++; } /* (changes all off the screen) */ /* (a part only into a picture of our own: the window's buffer does not keep its pixels) */
+    else { if (d > 0) still.why[4]++; rec_replay_in(NULL); frameFull = 1; still.whole++; }
+    rec_keep(); lastGen = texGen; lastOk = 1; still.frames++; }
+  else { frameFull = 1; if (recSpilled) { lastOk = 0; recNB = 0; recNV = 0; } if (recWant) { still.whole++; still.frames++; } } /* (drawn as it came: nothing to compare the next one with) */
+  glDisable(GL_SCISSOR_TEST);
+  if (recWant && still.frames >= 3600) { fprintf(stderr, "[still] of %u frames: %u not drawn, %u in part (%.0f%% of the screen on average), %u whole (new %u, pictures %u, clear %u, batches %u, big %u; resets %u, spills %u)\n", still.frames, still.kept, still.part, still.part ? 100 * still.partArea / still.part : 0.0, still.whole, still.why[0], still.why[1], still.why[2], still.why[3], still.why[4], still.resets, still.spills); still.resets = still.spills = 0;
+    still.frames = still.kept = still.part = still.whole = 0; still.partArea = 0; memset(still.why, 0, sizeof still.why); }
+}
+#ifdef SB_ANDROIDTV
+#include <EGL/egl.h>
+/* how many frames old the window's buffer about to be drawn is (EGL_EXT_buffer_age): 0 when unknown (its pixels are not to be trusted) */
+static int still_buffer_age(void) {
+  static int has = -1; EGLDisplay d = eglGetCurrentDisplay(); EGLSurface s = eglGetCurrentSurface(EGL_DRAW);
+  if (d == EGL_NO_DISPLAY || s == EGL_NO_SURFACE) return 0;
+  if (has < 0) { const char *e = eglQueryString(d, EGL_EXTENSIONS); has = e && strstr(e, "EGL_EXT_buffer_age") != NULL; fprintf(stderr, "[gfx] buffer age %s\n", has ? "known: parts copied" : "not told: copied whole"); }
+  EGLint age = 0; if (!has || !eglQuerySurface(d, s, 0x313D /* EGL_BUFFER_AGE_EXT */, &age)) return 0; return age; }
+#else
+static int still_buffer_age(void) { return 0; }
+#endif
+/* a picture drawn smaller than the screen (Android TV draws at 1280x720) copied over the whole of it, filtered: a straight
+   copy, alpha included (the video plane shows through where the picture is clear), no blending */
+void gfx_upscale(GLuint tex, int W, int H) {
+  static GLuint prog; static GLint aP, aT; static int bad;
+  if (bad) return;
+  if (!prog) {
+    GLuint v = shader(GL_VERTEX_SHADER, SB_GLSL_PRECISION, "attribute vec2 aP; attribute vec2 aT; varying vec2 vT; void main(){ vT = aT; gl_Position = vec4(aP, 0.0, 1.0); }\n", NULL);
+    GLuint f = shader(GL_FRAGMENT_SHADER, SB_GLSL_PRECISION, "uniform sampler2D uT; varying vec2 vT; void main(){ gl_FragColor = texture2D(uT, vT); }\n", NULL);
+    prog = glCreateProgram(); glAttachShader(prog, v); glAttachShader(prog, f); glLinkProgram(prog);
+    GLint ok = 0; glGetProgramiv(prog, GL_LINK_STATUS, &ok); if (!ok) { fprintf(stderr, "[gfx] upscale program refused\n"); bad = 1; return; }
+    aP = glGetAttribLocation(prog, "aP"); aT = glGetAttribLocation(prog, "aT"); glUseProgram(prog); glUniform1i(glGetUniformLocation(prog, "uT"), 0);
+  }
+  gfx_flush();
+  static const GLfloat q[] = { -1, -1, 0, 0,  1, -1, 1, 0,  -1, 1, 0, 1,  1, 1, 1, 1 }; /* (a target's texture is bottom-up, as the screen is) */
+  glBindFramebuffer(GL_FRAMEBUFFER, 0); glViewport(0, 0, W, H); glDisable(GL_SCISSOR_TEST); glDisable(GL_BLEND); blendOn = 0;
+  /* only a part of the picture drawn again: the screen's buffer is brought up to date in the parts it is missing, if the
+     driver says how old it is (its "age": the frames since it was shown; the parts changed in those frames, with this
+     one's, are what it lacks). Not said, or older than what is remembered: copied whole */
+  int part = 0, P[4] = { 0, 0, 0, 0 }; /* (in the picture's pixels, from the top) */
+  { int age = still_buffer_age();
+    if (!frameFull && age >= 1 && age - 1 <= still.n) { int x0 = frameRect[0], y0 = frameRect[1], x1 = x0 + frameRect[2], y1 = y0 + frameRect[3];
+      for (int i = 0; i < age - 1; i++) { int *a = still.at[i]; if (a[2] < 0) { x0 = -1; break; } if (a[0] < x0) x0 = a[0]; if (a[1] < y0) y0 = a[1]; if (a[0] + a[2] > x1) x1 = a[0] + a[2]; if (a[1] + a[3] > y1) y1 = a[1] + a[3]; }
+      if (x0 >= 0) { part = 1; P[0] = x0; P[1] = y0; P[2] = x1 - x0; P[3] = y1 - y0; } }
+    memmove(still.at[1], still.at[0], sizeof still.at[0] * 3); /* (remembered: this frame's part, or "all" (w -1)) */
+    if (frameFull) { still.at[0][0] = 0; still.at[0][1] = 0; still.at[0][2] = -1; still.at[0][3] = -1; } else memcpy(still.at[0], frameRect, sizeof frameRect);
+    if (still.n < 3) still.n++; }
+  if (part) { /* the part, in the screen's pixels, out to whole ones and two more (the filter reads its neighbours) */
+    float kx = (float)W / surfW, ky = (float)H / surfH; int x0 = (int)floorf(P[0] * kx) - 2, x1 = (int)ceilf((P[0] + P[2]) * kx) + 2, y0 = (int)floorf(P[1] * ky) - 2, y1 = (int)ceilf((P[1] + P[3]) * ky) + 2;
+    if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > W) x1 = W; if (y1 > H) y1 = H;
+    glEnable(GL_SCISSOR_TEST); glScissor(x0, H - y1, x1 - x0, y1 - y0); }
+  else { /* the copy covers the whole screen: its last picture is not needed. Said to the driver, a tiled GPU (every box's) skips
+       reading the old frame back from memory into each tile before drawing; a driver with neither call gets a clear,
+       which tiled GPUs take the same way */
+    typedef void (*Discard)(GLenum, GLsizei, const GLenum *); static Discard discard; static int how = -1;
+    if (how < 0) { const char *v = (const char *)glGetString(GL_VERSION); how = 0;
+      if (SDL_GL_ExtensionSupported("GL_EXT_discard_framebuffer") && (discard = (Discard)SDL_GL_GetProcAddress("glDiscardFramebufferEXT"))) how = 1;
+      else if (v && strstr(v, "OpenGL ES 3") && (discard = (Discard)SDL_GL_GetProcAddress("glInvalidateFramebuffer"))) how = 2;
+      fprintf(stderr, "[gfx] screen copy: %s\n", how == 1 ? "discard (EXT)" : how == 2 ? "invalidate (ES 3)" : "clear"); }
+    static const GLenum color = 0x1800; /* GL_COLOR_EXT / GL_COLOR: the default framebuffer's colour */
+    if (how) discard(GL_FRAMEBUFFER, 1, &color); else glClear(GL_COLOR_BUFFER_BIT); } /* (copied whole only: a part keeps the rest) */
+  glUseProgram(prog); glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex);
+  glBindBuffer(GL_ARRAY_BUFFER, 0);
+  glEnableVertexAttribArray(aP); glVertexAttribPointer(aP, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), q);
+  glEnableVertexAttribArray(aT); glVertexAttribPointer(aT, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), q + 2);
+  glDrawArrays(GL_TRIANGLE_STRIP, 0, 4); glDisable(GL_SCISSOR_TEST);
+  glBindBuffer(GL_ARRAY_BUFFER, vbos[vboCur]); glBindFramebuffer(GL_FRAMEBUFFER, screenFbo); glViewport(0, 0, surfW, surfH);
+  curProg = -1; curTex = 0; /* (the next batch sets its program and picture again) */
+}
 
 /* ---- quads ------------------------------------------------------------------------------- */
 static uint32_t to_abgr(uint32_t c) { /* 0xAARRGGBB -> bytes R,G,B,A in memory (little endian) */
@@ -360,11 +526,10 @@ void gfx_hole(float x, float y, float w, float h, float r, float a) {
 #ifdef SB_MAC
   { extern void video_mac_hole(float, float, float, float, float, float); video_mac_hole(x, y, w, h, r, a); return; } /* the preview has no plane under its window: the picture is drawn in the box */
 #endif
-  gfx_flush();
-  glBlendFuncSeparate(GL_ZERO, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE_MINUS_SRC_ALPHA);
+  gfx_flush(); curHole = 1;
   uint32_t c = BLACK_A((int)(255 * (a > 1 ? 1 : a))); if (r < 1) r = 1; /* (the shape program: a plain opaque fill would skip the blend) */
   if (!nine(CK_FILL, x, y, w, h, r, 0, 0, c, c, c, c)) quad(P_SHAPE, 0, x, y, w, h, r, 0, 0, 1, c, c, c, c, 0, 0, 1, 1);
-  gfx_flush(); glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+  gfx_flush(); curHole = 0;
 }
 void gfx_rrect_v(float x, float y, float w, float h, float r, uint32_t t, uint32_t b) { if ((invisible(t) && invisible(b)) || clipped_out(x, y, w, h)) return;
   if (r <= 0) { plain(x, y, w, h, t, t, b, b); return; }
@@ -401,7 +566,7 @@ static int treg_find(GLuint t) { unsigned i = t % TREG; for (int k = 0; k < TREG
 static void treg_del(GLuint t) { int i = treg_find(t); if (i < 0) return; texBytes -= (long)treg[i].w * treg[i].h * treg[i].ch; texCount--; treg[i].t = 0;
   /* (open addressing: the run after it is put back so later lookups still find their entries) */
   for (unsigned j = ((unsigned)i + 1) % TREG; treg[j].t; j = (j + 1) % TREG) { GLuint u = treg[j].t; int w = treg[j].w, h = treg[j].h, ch = treg[j].ch; treg[j].t = 0; texBytes -= (long)w * h * ch; texCount--; treg_add(u, w, h, ch); } }
-static void gl_del(GLuint t) { treg_del(t); glDeleteTextures(1, &t); }
+static void gl_del(GLuint t) { gfx_still_spill(); texGen++; treg_del(t); glDeleteTextures(1, &t); }
 #define POOL_N 8
 #define POOL_BYTES (12L * 1024 * 1024)
 static struct { GLuint t; int w, h, ch, lin; unsigned at; } pool[POOL_N];
@@ -413,7 +578,7 @@ static GLuint pool_take(int w, int h, int ch, int lin) {
 }
 void gfx_tex_recycle(GLuint t, int w, int h, int ch, int linear) {
   if (!t) return; if (curTex == t) gfx_flush(); extern void gfx_tex_fade_forget(GLuint); gfx_tex_fade_forget(t);
-  { int r = treg_find(t); if (r < 0) { glDeleteTextures(1, &t); return; } w = treg[r].w; h = treg[r].h; ch = treg[r].ch; } /* (its real size) */
+  { int r = treg_find(t); if (r < 0) { gfx_still_spill(); texGen++; glDeleteTextures(1, &t); return; } w = treg[r].w; h = treg[r].h; ch = treg[r].ch; } /* (its real size) */
   for (int i = 0; i < npool; i++) if (pool[i].t == t) return; /* (already kept) */
   long b = (long)w * h * ch; if (b < 64 * 1024 || b > POOL_BYTES / 2) { gl_del(t); return; } /* (small ones are cheap to make) */
   while (npool && (npool == POOL_N || poolBytes + b > POOL_BYTES)) { int o = 0; for (int i = 1; i < npool; i++) if (pool[i].at < pool[o].at) o = i; pool_drop(o); }
@@ -422,6 +587,7 @@ void gfx_tex_recycle(GLuint t, int w, int h, int ch, int linear) {
 void gfx_pool_clear(void) { while (npool) pool_drop(npool - 1); } /* (the memory guard) */
 static void pool_age(void) { for (int i = 0; i < npool; i++) if (frameCounter - pool[i].at > 600) { pool_drop(i); i--; } } /* none kept past 10 s */
 GLuint gfx_tex_create(const unsigned char *px, int w, int h, int ch, int linear) {
+  gfx_still_spill(); texGen++;
   GLenum f = ch == 1 ? GL_ALPHA : ch == 3 ? GL_RGB : GL_RGBA;
   { GLuint t = pool_take(w, h, ch, linear); if (t) { glBindTexture(GL_TEXTURE_2D, t); if (curTex == t) curTex = 0;
       if (px) { glPixelStorei(GL_UNPACK_ALIGNMENT, 1); glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, f, GL_UNSIGNED_BYTE, px); } return t; } }
@@ -476,6 +642,7 @@ void gfx_alpha_tex_uv(GLuint tex, float x, float y, float w, float h, uint32_t c
   quad(P_ALPHA, tex, x, y, w, h, 0, 0, 0, 0, c, c, c, c, u0, v0, u1, v1);
 }
 void gfx_tex_update(GLuint t, const unsigned char *px, int x, int y, int w, int h, int ch) {
+  gfx_still_spill(); texGen++;
   gfx_flush(); /* what is queued draws first (each flush binds its own texture again) */
   GLenum f = ch == 1 ? GL_ALPHA : ch == 3 ? GL_RGB : GL_RGBA;
   glBindTexture(GL_TEXTURE_2D, t); glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -516,6 +683,7 @@ void gfx_blur_pass(GfxTarget *dst, GLuint src, int w, int h, int vertical, float
 }
 int gfx_mid_switches(void) { int n = midSwitch; midSwitch = 0; return n; }
 void gfx_target_begin(GfxTarget *t, uint32_t c) {
+  gfx_still_spill(); texGen++;
   gfx_flush();
   if (scrDirty) { midSwitch++; if (getenv("SB_MIDLOG")) fprintf(stderr, "[mid] %ux%u at frame %u\n", t->w, t->h, frameCounter); }
   tgtOn = 1; saved.on = 1; saved.surfW = surfW; saved.surfH = surfH; saved.scl = scl; saved.nclip = nclip; saved.nopac = nopac; saved.noff = noff; saved.nsc = nsc;
