@@ -161,13 +161,30 @@ void plat_pre_init(const char *appId) { (void)appId;
 void plat_post_window(SDL_Window *w) { (void)w; }
 const char *plat_asset_dir(void) { return assetDir; }
 const char *plat_data_dir(void) { return dataDir; }
-/* the drawing surface, fixed as on LG: 1920x1080 (a 4K screen scales it up, as LG's own compositor does), or 1280x720
-   when the "720p light" setting is on; the same setting and rule as the TV (main.c) */
+/* The UI's drawing size (stremio-origin/androidtv#1: the UI looked soft on a 4K Shield). The surface is fixed and the
+   display scales it to the panel; what is drawn into it:
+     auto (default): a strong box (NVIDIA Shield, or 3.5 GB of RAM and up) draws at the display mode's own lines, 2160 on
+                     a TV in a 4K mode, else 1080; any other box keeps the 1280x720 picture scaled to a 1080 surface
+                     (main.c: a weak box's GPU spends most of its frame filling pixels)
+     SB_RES=2160 / 4k: 2160 when the display is in a 4K mode, else 1080;  1080 / full: 1080;  720: a 720 surface
+   (SB_RES reaches a debug or SB_DEVHOOKS build: adb shell am start -n <pkg>/app.stremioorigin.tv.MainActivity --es env "SB_RES=2160") */
+static int uiLines, uiOff720;
+static void ui_res_pick(void) {
+  if (uiLines) return;
+  const char *res = getenv("SB_RES") ? getenv("SB_RES") : "auto";
+  char s[16] = "", model[160] = ""; info(ATV_MODELINES, s, sizeof s); info(ATV_MODEL, model, sizeof model);
+  int mode = atoi(s), mem = plat_mem_total_mb(), strong = strstr(model, "NVIDIA") != NULL || mem >= 3500;
+  if (!strcmp(res, "720")) uiLines = 720;
+  else if (!strcmp(res, "1080") || !strcmp(res, "full")) uiLines = 1080;
+  else if (!strcmp(res, "2160") || !strcmp(res, "4k")) uiLines = mode >= 2160 ? 2160 : 1080;
+  else { uiLines = strong && mode >= 2160 ? 2160 : 1080; uiOff720 = !strong; }
+  fprintf(stderr, "[start] UI resolution %s: display mode %d lines, %s (%d MB): surface %d lines%s\n", res, mode, model, mem, uiLines, uiOff720 ? ", drawn at 720 and scaled" : "");
+}
+int atv_ui_offscreen720(void) { ui_res_pick(); return uiOff720; }
 void plat_window_size(int *w, int *h, Uint32 *flags) {
-  const char *res = getenv("SB_RES") ? getenv("SB_RES") : store_get("uiRes", "auto");
-  int light = !strcmp(res, "720");
-  *w = light ? 1280 : 1920; *h = light ? 720 : 1080; *flags = SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN;
-  atv_call_int("surfaceSize", light ? 720 : 1080);
+  ui_res_pick();
+  *w = uiLines * 16 / 9; *h = uiLines; *flags = SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN;
+  atv_call_int("surfaceSize", uiLines);
 }
 int plat_text_input(void) { return 0; }   /* a remote, no keyboard: the app draws its own */
 const char *plat_device_name(void) { return devName; }

@@ -11,7 +11,6 @@ import java.io.FileNotFoundException;
 
 /* Hands the downloaded update (<cache>/update.apk) to the system's installer, read-only, to the one it was granted to. */
 public class ApkProvider extends ContentProvider {
-    static final String AUTH = "app.stremioorigin.tv.apk";
     @Override public boolean onCreate() { return true; }
     @Override public String getType(Uri u) { return "application/vnd.android.package-archive"; }
     @Override public ParcelFileDescriptor openFile(Uri u, String mode) throws FileNotFoundException {

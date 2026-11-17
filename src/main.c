@@ -290,9 +290,9 @@ int main(int argc, char **argv) {
 #ifdef SB_ANDROIDTV
   { /* Android TV draws at 1280x720 into a picture of its own, copied scaled to the whole screen at the end of each frame:
        a third of 1080p's pixels to fill and blend, the part a weak box's GPU spends most of its frame on. The window and
-       the surface stay 1920x1080 (the pointer and the video plane read them as before). SB_RES=1080 (or "full") draws at
-       the screen's size */
-    const char *r = getenv("SB_RES"); int want = !r || (strcmp(r, "1080") && strcmp(r, "full"));
+       the surface stay 1920x1080 (the pointer and the video plane read them as before). A strong box, or SB_RES set,
+       draws at the surface's own size instead: 3840x2160 on a TV in a 4K mode (plat_atv.c, atv_ui_offscreen720) */
+    extern int atv_ui_offscreen720(void); int want = atv_ui_offscreen720();
     if (want && dh > 720 && gfx_target_create(&atvLow, 1280, 720)) { gfx_set_screen_fbo(atvLow.fbo); gfx_resize(1280, 720); dw = 1280; dh = 720; }
     fprintf(stderr, "[start] drawing at %dx%d%s\n", dw, dh, atvLow.fbo ? ", scaled to the screen" : "");
     /* a frame the same as the last one is not drawn again: still on the screen (a page at rest, the background trailer
@@ -312,7 +312,12 @@ int main(int argc, char **argv) {
 #else
   cache_prune_start(400);
 #endif
-  snprintf(p, sizeof p, "%s/cache", store_data_dir()); img_init(p); img_set_draw_scale(gfx_scale());
+  snprintf(p, sizeof p, "%s/cache", store_data_dir()); img_init(p);
+#ifdef SB_ANDROIDTV
+  img_set_draw_scale(gfx_scale() > 1 && memMb >= 2800 ? gfx_scale() : gfx_scale() > 1 ? 1.0f : gfx_scale()); /* a 4K UI: pictures at the panel's pixels too where the RAM allows (each takes four times the memory), else at layout size */
+#else
+  img_set_draw_scale(gfx_scale());
+#endif
   if (memMb > 0) img_set_budget_mb(memMb < 1200 ? 40 : memMb < 3000 ? 128 : 192); /* pictures under the RAM the TV has (the shared atlas, backdrop and text add ~20 MB) */
   i18n_init(plat_asset_dir(), getenv("SB_LANG") ? getenv("SB_LANG") : store_get("uiLang", "auto")); /* SB_LANG=ar: development */
   if (!text_init(plat_asset_dir(), gfx_scale())) return 1;

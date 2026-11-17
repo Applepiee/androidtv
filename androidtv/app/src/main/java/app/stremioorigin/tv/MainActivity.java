@@ -184,7 +184,7 @@ public class MainActivity extends SDLActivity {
     private static void install(final MainActivity a, File apk) throws IOException {
         if (Build.VERSION.SDK_INT >= 29 && !android.provider.Settings.canDrawOverlays(a)) {
             android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_INSTALL_PACKAGE)
-                .setData(Uri.parse("content://" + ApkProvider.AUTH + "/update.apk"))
+                .setData(Uri.parse("content://" + a.getPackageName() + ".apk/update.apk"))
                 .addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 .putExtra(android.content.Intent.EXTRA_INSTALLER_PACKAGE_NAME, a.getPackageName());
             a.runOnUiThread(() -> { try { a.startActivity(i); installAskedAt = System.currentTimeMillis(); updSay("Confirm the update on the screen", -1); } catch (Throwable e) { updFail("The installer did not open"); } });
@@ -352,6 +352,7 @@ public class MainActivity extends SDLActivity {
                 case 8: return "";   /* no MAC: the phone never wakes the box, it only opens the app when both are on */
                 case 9: return castExtra(a);
                 case 10: return lastExit(a);
+                case 11: return String.valueOf(modeLines(a));
             }
         } catch (Throwable e) { MainActivity.log("info " + what + ": " + e); }
         return "";
@@ -372,6 +373,13 @@ public class MainActivity extends SDLActivity {
         if (Build.VERSION.SDK_INT >= 23) { for (Display.Mode m : d.getSupportedModes()) best = Math.max(best, Math.min(m.getPhysicalWidth(), m.getPhysicalHeight())); }
         if (best == 0) { android.graphics.Point p = new android.graphics.Point(); d.getRealSize(p); best = Math.min(p.x, p.y); }
         return best;
+    }
+    /* the lines of the mode the display runs now (2160 on a Shield set to 4K; 1080 when the TV is set to 1080p, whatever
+       the panel could do): the UI's drawing size follows it (src/platform/androidtv/plat_atv.c) */
+    static int modeLines(Context c) {
+        Display d = ((WindowManager) c.getSystemService(Context.WINDOW_SERVICE)).getDefaultDisplay();
+        if (Build.VERSION.SDK_INT >= 23) { Display.Mode m = d.getMode(); if (m != null) return Math.min(m.getPhysicalWidth(), m.getPhysicalHeight()); }
+        android.graphics.Point p = new android.graphics.Point(); d.getRealSize(p); return Math.min(p.x, p.y);
     }
     /* what the box plays, for the best-stream rules (the same fields the LG app reads from its TV): the screen's size,
        HDR10 and Dolby Vision on the screen with a decoder for them, AV1 in hardware; DTS and TrueHD always (passed
@@ -417,7 +425,7 @@ public class MainActivity extends SDLActivity {
         return false;
     }
 
-    /* the drawing surface's size, fixed (the TV scales it to the screen): 1080 or 720 lines (src: plat_window_size) */
+    /* the drawing surface's size, fixed (the TV scales it to the screen): 2160, 1080 or 720 lines (src: plat_window_size) */
     public static void surfaceSize(int lines) {
         final MainActivity a = self; if (a == null) return;
         final int h = lines, w = lines * 16 / 9;

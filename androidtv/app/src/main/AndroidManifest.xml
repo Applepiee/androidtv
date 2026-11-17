@@ -72,7 +72,7 @@
         <!-- Fire TV: the app can be opened from a phone over DIAL (res/xml/whisperplay.xml) -->
         <meta-data android:name="whisperplay" android:resource="@xml/whisperplay" />
         <!-- the downloaded update, read by the system's installer (ApkProvider) -->
-        <provider android:name="app.stremioorigin.tv.ApkProvider" android:authorities="app.stremioorigin.tv.apk" android:exported="false" android:grantUriPermissions="true" />
+        <provider android:name="app.stremioorigin.tv.ApkProvider" android:authorities="${applicationId}.apk" android:exported="false" android:grantUriPermissions="true" />
         <!-- the app opens again after an update it started itself (UpdatedReceiver) -->
         <!-- the TV's home-screen rows: made at install, kept over a restart, a title the user takes off kept off (HomeRowsReceiver) -->
         <receiver android:name="app.stremioorigin.tv.HomeRowsReceiver" android:exported="true">

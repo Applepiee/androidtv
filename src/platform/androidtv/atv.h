@@ -4,7 +4,7 @@
 #include <jni.h>
 #define ATV_PKG "app/stremioorigin/tv"   /* the Java package (keep in step with androidtv/app/build.gradle) */
 #define ATV_KEY_BASE 0x1000             /* remote keys from Java: scancode = base + Android's KEYCODE_* */
-enum { ATV_MODEL = 0, ATV_RELEASE, ATV_LOCALE, ATV_FILES, ATV_CACHE, ATV_LIBDIR, ATV_CAPS, ATV_PANEL, ATV_MAC, ATV_CASTX, ATV_EXIT };   /* MainActivity.info() */
+enum { ATV_MODEL = 0, ATV_RELEASE, ATV_LOCALE, ATV_FILES, ATV_CACHE, ATV_LIBDIR, ATV_CAPS, ATV_PANEL, ATV_MAC, ATV_CASTX, ATV_EXIT, ATV_MODELINES };   /* MainActivity.info() */
 JNIEnv *atv_env(void);
 jclass atv_class(JNIEnv *e, int which);   /* 0 MainActivity, 1 VideoPlane */
 jmethodID atv_method(JNIEnv *e, int which, const char *name, const char *sig);

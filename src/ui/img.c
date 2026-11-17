@@ -279,7 +279,7 @@ int img_init(const char *dir) {
   return 1;
 }
 static float drawScale = 1.0f;
-void img_set_draw_scale(float sc) { drawScale = sc > 0 && sc < 1 ? sc : 1.0f; }
+void img_set_draw_scale(float sc) { drawScale = sc > 0 && sc <= 2 ? sc : 1.0f; } /* (above 1 only when the caller asks: Android TV drawing at 4K) */
 void img_set_budget_mb(int mb) { budgetBytes = (long)mb * 1024 * 1024; }
 int img_budget_mb(void) { return (int)(budgetBytes / (1024 * 1024)); }
 void img_queue_stats(int *queued, int *waiting) { pthread_mutex_lock(&mu); *queued = qn; *waiting = dn; pthread_mutex_unlock(&mu); }
